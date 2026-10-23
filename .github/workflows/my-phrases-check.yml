@@ -1,0 +1,84 @@
+# 本 fork 自己加的流程(不是官方檔案):檢查 my-phrases/ 的自訂詞庫。
+# 說明見 my-phrases/README.md。
+name: 檢查自訂詞庫
+
+on:
+  pull_request:
+    paths:
+      - my-phrases/**
+      - my-scripts/**
+      - data/data.txt
+      - src/Server/Engine/**
+      - .github/workflows/my-phrases-check.yml
+  push:
+    branches: [main]
+    paths:
+      - my-phrases/**
+      - my-scripts/**
+      - data/data.txt
+      - src/Server/Engine/**
+      - .github/workflows/my-phrases-check.yml
+  workflow_dispatch:
+
+concurrency:
+  group: my-phrases-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check:
+    name: 檢查讀音與引擎組字
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: 檢查讀音、重複和破音字
+        run: python3 my-scripts/check_phrases.py
+
+      # 下面兩步就算上一步失敗也照跑,一次看到所有問題
+      - name: 編譯引擎檢查程式(只編官方的 src/Server/Engine,不修改它)
+        if: ${{ !cancelled() }}
+        run: |
+          cmake -S my-scripts/engine-check -B "$RUNNER_TEMP/engine-check" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/engine-check" -j "$(nproc)"
+
+      - name: 用引擎確認每個詞都是第一個候選、而且不是多餘的
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          "$RUNNER_TEMP/engine-check/engine_check" data/data.txt my-phrases/*.txt > "$RUNNER_TEMP/engine.tsv"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/engine.tsv"
+          # 在 PR 的檔案上標出有問題的那一行
+          awk -F'\t' '
+            $1 == "NOT_FIRST" || $1 == "REDUNDANT" {
+              split($2, loc, ":")
+              msg = ($1 == "NOT_FIRST") \
+                ? "「" $3 "」輸入 " $4 " 的第一個候選是「" $7 "」,組字結果是「" $6 "」" \
+                : "「" $3 "」不載入自訂詞庫,引擎本來就會打出來(" $4 "),是多餘的"
+              printf "::error file=%s,line=%s::%s\n", loc[1], loc[2], msg
+            }' "$RUNNER_TEMP/engine.tsv"
+          {
+            echo "## 引擎組字檢查"
+            echo
+            echo "載入 data/data.txt 和 my-phrases/*.txt,逐一輸入每個詞的注音:"
+            echo "- NOT_FIRST:組字結果或第一個候選不是這個詞"
+            echo "- REDUNDANT:不載入 my-phrases/,引擎本來就會打出這個詞"
+            echo
+            echo "結果:\`$(tail -n 1 "$RUNNER_TEMP/engine.tsv")\`"
+            if [ "$status" -ne 0 ]; then
+              echo
+              echo "| 狀態 | 位置 | 詞 | 注音 | 不載入時 | 載入後 | 第一個候選 |"
+              echo "| --- | --- | --- | --- | --- | --- | --- |"
+              awk -F'\t' '$1 == "NOT_FIRST" || $1 == "REDUNDANT" {
+                printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7 }' "$RUNNER_TEMP/engine.tsv"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
