@@ -1,0 +1,56 @@
+# 本 fork 自己加的流程(不是官方檔案):在 Windows 上測試 my-scripts/ 的詞庫安裝和備份腳本。
+# 說明見 MY-SETUP.md。
+name: 測試詞庫腳本
+
+on:
+  pull_request:
+    paths:
+      - my-scripts/*.ps1
+      - my-scripts/tests/**
+      - .github/workflows/my-scripts-test.yml
+  push:
+    branches: [main]
+    paths:
+      - my-scripts/*.ps1
+      - my-scripts/tests/**
+      - .github/workflows/my-scripts-test.yml
+  workflow_dispatch:
+
+concurrency:
+  group: my-scripts-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  test:
+    name: Windows PowerShell 5.1 和 PowerShell 7
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # 測試照說明文件的方式從 GitHub 下載腳本和詞庫,用這次測試的 commit
+      TEST_DOWNLOAD_REPO: ${{ github.repository }}
+      TEST_DOWNLOAD_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+      # 只用來避免 GitHub API 未登入的次數限制
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TEST_DOWNLOAD_REF }}
+          persist-credentials: false
+
+      # Windows 內建的版本,使用者實際執行時用的就是它
+      - name: Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\my-scripts\tests\test-phrase-scripts.ps1
+          exit $LASTEXITCODE
+
+      - name: PowerShell 7
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          .\my-scripts\tests\test-phrase-scripts.ps1
+          exit $LASTEXITCODE
