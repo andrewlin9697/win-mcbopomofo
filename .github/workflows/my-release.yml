@@ -1,0 +1,276 @@
+# 本 fork 自己加的流程(不是官方檔案):編譯小麥注音安裝檔,發布成 GitHub Release。
+# 說明見 MY-SETUP.md。
+name: 建置並發布安裝檔
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 強制重新發布(就算這個官方版本已經發布過)
+        type: boolean
+        default: false
+  # 給「每週同步官方」呼叫
+  workflow_call:
+    inputs:
+      force:
+        type: boolean
+        default: false
+  # PR 階段只 build 不發布,用來驗證流程本身的修改
+  pull_request:
+    paths:
+      - .github/workflows/my-*.yml
+
+# 自己執行時和「每週同步官方」共用 my-pipeline,同一時間只會有一個在跑。
+# 被同步流程呼叫時,my-pipeline 已經由同步流程佔住,這裡換一個不重複的名字,避免互相等待卡死。
+# PR 的測試 build 各自一組,PR 有新 push 時取消舊的。
+concurrency:
+  group: >-
+    ${{ github.event_name == 'pull_request' && format('my-release-pr-{0}', github.ref)
+    || contains(github.workflow_ref, '/.github/workflows/my-release.yml@') && 'my-pipeline'
+    || format('my-release-called-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  UPSTREAM_REPO: openvanilla/win-mcbopomofo
+  MSI_NAME: Win-McBopomofo-Installer.msi
+
+jobs:
+  plan:
+    name: 決定版本
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+      exists: ${{ steps.plan.outputs.exists }}
+      build_sha: ${{ steps.plan.outputs.build_sha }}
+      tag: ${{ steps.plan.outputs.tag }}
+      title: ${{ steps.plan.outputs.title }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # PR:build PR 的內容。其他情況一律 build main 現在的樣子(被同步流程呼叫時 main 剛更新過)
+          ref: ${{ github.event_name != 'pull_request' && 'main' || '' }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          export TZ=Asia/Taipei
+          up_url="https://github.com/$UPSTREAM_REPO"
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          git remote add upstream "$up_url.git"
+          git fetch --quiet --no-tags --filter=blob:none upstream main
+
+          build_sha=$(git rev-parse HEAD)
+          # 版本以「本 fork 已經包含的最新官方 commit」為準
+          up_sha=$(git merge-base HEAD upstream/main)
+          short=${up_sha:0:7}
+          date_dot=$(git log -1 --format=%cd --date=format-local:%Y.%m.%d "$up_sha")
+          date_dash=${date_dot//./-}
+          tag="upstream-$date_dot-$short"
+          title="小麥注音 $date_dash(官方 $short)"
+
+          behind=$(git rev-list --count HEAD..upstream/main)
+          if [ "$behind" -gt 0 ]; then
+            echo "::warning::本 fork 落後官方 $behind 個 commit,這次只能發布已經同步進來的 $short。請先執行「每週同步官方」,或到 repo 頁面按 Sync fork。"
+          fi
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --silent 2>/dev/null; then exists=true; else exists=false; fi
+
+          if [ "$EVENT" = pull_request ]; then
+            build=true; publish=false; decision="PR 測試 build:只 build,不發布"
+          elif [ "$exists" = false ]; then
+            build=true; publish=true; decision="$tag 還沒發布,這次會 build 並發布"
+          elif [ "$FORCE" = true ]; then
+            build=true; publish=true; decision="$tag 已經發布過,勾選了強制重新發布,會刪掉舊的再發一次"
+          else
+            build=false; publish=false; decision="$tag 已經發布過,什麼都不做"
+          fi
+          echo "$decision"
+
+          # ---- Release 說明 ----
+          # 上一版:最近一個 upstream-* Release(不含這次的 tag)
+          prev_tag=$(gh release list --exclude-drafts --limit 100 --json tagName,createdAt \
+            | jq -r --arg tag "$tag" '[.[] | select(.tagName | startswith("upstream-")) | select(.tagName != $tag)]
+                                      | sort_by(.createdAt) | last | .tagName // empty')
+          prev_sha=""
+          if [ -n "$prev_tag" ]; then
+            prev_sha=$(gh release view "$prev_tag" --json body -q .body \
+              | grep -oE 'upstream-commit: [0-9a-f]{40}' | head -n 1 | cut -d' ' -f2 || true)
+            if [ -z "$prev_sha" ]; then
+              prev_sha=$(git rev-parse --verify -q "${prev_tag##*-}^{commit}" || true)
+            fi
+          fi
+
+          # 整行 commit 說明都放在連結文字裡:GitHub 不會把連結裡的 @ 和 # 當成提及或 issue 參照
+          list_commits() {
+            git log --date=format-local:%Y-%m-%d --format='%H %cd %s' "$@" | while read -r sha d subj; do
+              subj=$(printf '%s' "$subj" | sed -e 's/\\/\\\\/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+              echo "- $d [\`${sha:0:7}\` $subj]($up_url/commit/$sha)"
+            done
+          }
+
+          {
+            echo "> 這是個人 fork 用 GitHub Actions 從官方原始碼自動編譯的**非官方**安裝檔,沒有數位簽章。官方專案:$up_url"
+            echo
+            echo "- 對應官方 commit:[\`$short\`]($up_url/commit/$up_sha)($date_dash)"
+            echo "- 本 fork 建置來源:[\`${build_sha:0:7}\`]($repo_url/commit/$build_sha)"
+            echo "- 建置紀錄:$repo_url/actions/runs/$GITHUB_RUN_ID"
+            echo
+            if [ -n "$prev_sha" ]; then
+              count=$(git rev-list --count "$prev_sha..$up_sha")
+              echo "## 上一版之後官方新增的 commit($count 個)"
+              echo
+              echo "上一版:[$prev_tag]($repo_url/releases/tag/$prev_tag)"
+              echo
+              if [ "$count" -eq 0 ]; then
+                echo "沒有新的官方 commit(這次是重新發布)。"
+              else
+                list_commits --max-count=100 "$prev_sha..$up_sha"
+                if [ "$count" -gt 100 ]; then
+                  echo
+                  echo "……只列出最新 100 個,完整清單:$up_url/compare/$prev_sha...$up_sha"
+                fi
+              fi
+            else
+              echo "## 官方最近的 commit"
+              echo
+              echo "這是第一個版本,列出官方最近 20 個 commit:"
+              echo
+              list_commits --max-count=20 "$up_sha"
+            fi
+            echo
+            echo "<!-- upstream-commit: $up_sha -->"
+          } > "$RUNNER_TEMP/release-notes.md"
+
+          {
+            echo "### $decision"
+            echo
+            echo "- Tag:\`$tag\`"
+            echo "- 標題:$title"
+            echo
+            echo "<details><summary>Release 說明預覽</summary>"
+            echo
+            cat "$RUNNER_TEMP/release-notes.md"
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "build=$build"
+            echo "publish=$publish"
+            echo "exists=$exists"
+            echo "build_sha=$build_sha"
+            echo "tag=$tag"
+            echo "title=$title"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: steps.plan.outputs.publish == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: 編譯安裝檔(Windows)
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.build_sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      # 和官方 build.yml 的同名步驟相同
+      - name: Install WiX Toolset
+        run: |
+          winget install --id WiXToolset.WiXCLI --accept-package-agreements --accept-source-agreements
+          $env:Path += ";C:\Program Files\WiX Toolset v7.0\bin"
+          wix eula accept wix7
+
+      # WiX 擴充套件(wix extension add)由 build_msi.ps1 自己安裝
+      - name: Build MSI Installer
+        run: .\build_msi.ps1 -Configuration Release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: msi
+          path: dist/${{ env.MSI_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: 發布 Release
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      TITLE: ${{ needs.plan.outputs.title }}
+      BUILD_SHA: ${{ needs.plan.outputs.build_sha }}
+      EXISTS: ${{ needs.plan.outputs.exists }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: msi
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
+
+      - name: 建立 Release
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum "$MSI_NAME" > "$MSI_NAME.sha256")
+          hash=$(cut -d' ' -f1 "dist/$MSI_NAME.sha256")
+          {
+            cat notes/release-notes.md
+            echo
+            echo "## 安裝檔"
+            echo
+            echo "- \`$MSI_NAME\`(x64、x86、ARM64 都包在同一個安裝檔裡)"
+            echo "- SHA256:\`$hash\`"
+            echo
+            echo "下載後可以在 PowerShell 核對,印出來的值要和上面一樣:"
+            echo
+            echo '```powershell'
+            echo "(Get-FileHash .\\$MSI_NAME -Algorithm SHA256).Hash"
+            echo '```'
+          } > notes.md
+
+          if [ "$EXISTS" = true ]; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          # 同名 tag 如果還在(例如 Release 被手動刪掉但 tag 留著),先刪掉,讓 tag 指到這次 build 的 commit
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" --silent 2>/dev/null || true
+
+          gh release create "$TAG" "dist/$MSI_NAME" "dist/$MSI_NAME.sha256" \
+            --target "$BUILD_SHA" --title "$TITLE" --notes-file notes.md --latest
+          url=$(gh release view "$TAG" --json url -q .url)
+          echo "已發布:$url"
+          echo "### 已發布:[$TITLE]($url)" >> "$GITHUB_STEP_SUMMARY"
