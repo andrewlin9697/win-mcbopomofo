@@ -1,0 +1,172 @@
+# 本 fork 自己加的流程(不是官方檔案):每週把官方 main 合併進來,有需要就呼叫「建置並發布安裝檔」。
+# 說明見 MY-SETUP.md。
+name: 每週同步官方
+
+on:
+  schedule:
+    - cron: '17 1 * * 6' # 每週六 01:17 UTC = 台灣時間 09:17
+  workflow_dispatch:
+
+# 和「建置並發布安裝檔」共用,同一時間只會有一個在跑
+concurrency:
+  group: my-pipeline
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  UPSTREAM_REPO: openvanilla/win-mcbopomofo
+  # 公開 repo 60 天沒有活動,GitHub 會停用排程;main 超過這個天數沒有新 commit,就讓執行結果顯示成失敗來提醒
+  STALE_WARN_DAYS: 42
+
+jobs:
+  sync:
+    name: 同步官方 main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      run_release: ${{ steps.sync.outputs.run_release }}
+      stale: ${{ steps.sync.outputs.stale }}
+      days: ${{ steps.sync.outputs.days }}
+      deadline: ${{ steps.sync.outputs.deadline }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export TZ=Asia/Taipei
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --quiet --no-tags upstream main
+
+          up_sha=$(git rev-parse upstream/main)
+          short=${up_sha:0:7}
+          tag="upstream-$(git log -1 --format=%cd --date=format-local:%Y.%m.%d "$up_sha")-$short"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --silent 2>/dev/null; then released=true; else released=false; fi
+          new=$(git rev-list --count HEAD..upstream/main)
+          echo "官方 main 最新:$short(對應 Release:$tag,已發布:$released);本 fork 還沒合併的官方 commit:$new 個"
+
+          result=up-to-date
+          run_release=false
+          conflicts=""
+          if [ "$new" -gt 0 ]; then
+            before=$(git rev-parse HEAD)
+            if git merge --no-edit -m "Merge $UPSTREAM_REPO main ($short)" upstream/main; then
+              if git push origin HEAD:main 2> "$RUNNER_TEMP/push.err"; then
+                result=merged
+                run_release=true
+              else
+                cat "$RUNNER_TEMP/push.err" >&2
+                # GITHUB_TOKEN 沒有 workflows 權限,官方更新動到 .github/workflows/ 時推送會被拒
+                if grep -qi 'workflow' "$RUNNER_TEMP/push.err" \
+                   || [ -n "$(git diff --name-only "$before" HEAD -- .github/workflows)" ]; then
+                  result=push-rejected
+                else
+                  echo "::error::推送失敗,原因不是 workflow 權限,請看上面的訊息"
+                  exit 1
+                fi
+              fi
+            else
+              conflicts=$(git diff --name-only --diff-filter=U | head -n 20)
+              git merge --abort
+              result=conflict
+            fi
+          elif [ "$released" = false ]; then
+            result=release-only
+            run_release=true
+          fi
+
+          # 排程停用提醒:這次沒有推送新 commit 時,看 main 最後一個 commit 距今幾天
+          stale=false
+          days=0
+          deadline=""
+          if [ "$result" = up-to-date ] || [ "$result" = release-only ]; then
+            last=$(git log -1 --format=%ct origin/main)
+            days=$(( ($(date +%s) - last) / 86400 ))
+            if [ "$days" -ge "$STALE_WARN_DAYS" ]; then
+              stale=true
+              deadline=$(date -d "@$((last + 60 * 86400))" +%Y-%m-%d)
+            fi
+          fi
+
+          case "$result" in
+            up-to-date)    msg="官方沒有新 commit,最新版本 $tag 已經發布過,不用做事" ;;
+            release-only)  msg="官方沒有新 commit,但 $tag 還沒發布,接著建置並發布" ;;
+            merged)        msg="已合併官方 $new 個新 commit 並推送到 main,接著建置並發布" ;;
+            conflict)      msg="合併官方 main($short)時有衝突,已取消合併,main 沒有被改動" ;;
+            push-rejected) msg="官方更新動到 .github/workflows/,自動流程沒有權限推送,需要手動 Sync fork" ;;
+          esac
+          echo "$msg"
+          {
+            echo "### $msg"
+            if [ "$result" = conflict ]; then
+              echo
+              echo "衝突的檔案:"
+              echo
+              while IFS= read -r f; do echo "- \`$f\`"; done <<< "$conflicts"
+              echo
+              echo "main 沒有被改動,也沒有發布。需要手動解決衝突(可以請 Claude 幫忙)。**不要**在 Sync fork 按 Discard commits,那會刪掉本 fork 自己加的檔案。"
+            fi
+            if [ "$result" = push-rejected ]; then
+              echo
+              echo "請到 [repo 頁面]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY) 按 **Sync fork → Update branch**,完成後到 Actions 手動執行一次發布:左邊選「建置並發布安裝檔」→ **Run workflow**。"
+            fi
+            if [ "$stale" = true ]; then
+              echo
+              echo "main 已經 $days 天沒有新 commit,「每週同步官方」排程可能在 $deadline 左右被 GitHub 停用(公開 repo 60 天沒有活動就會停用)。在那之前 main 有新 commit 就會重新計算;已經被停用的話,到 Actions → 每週同步官方,按 **Enable workflow**。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "result=$result"
+            echo "run_release=$run_release"
+            echo "stale=$stale"
+            echo "days=$days"
+            echo "deadline=$deadline"
+          } >> "$GITHUB_OUTPUT"
+
+      # 衝突或需要手動 Sync fork:讓這次執行顯示成失敗(紅色),GitHub 會寄失敗通知信
+      - name: 需要手動處理
+        if: steps.sync.outputs.result == 'conflict' || steps.sync.outputs.result == 'push-rejected'
+        env:
+          RESULT: ${{ steps.sync.outputs.result }}
+        run: |
+          if [ "$RESULT" = conflict ]; then
+            echo "::error title=合併衝突::官方的更新和本 fork 的檔案衝突,已取消合併,main 沒有被改動,也沒有發布。衝突的檔案列在這次執行的摘要裡。不要在 Sync fork 按 Discard commits。"
+          else
+            echo "::error title=需要手動 Sync fork::官方更新動到 .github/workflows/,自動流程沒有權限推送。請到 repo 頁面按 Sync fork → Update branch,完成後到 Actions 手動執行一次發布(左邊選「建置並發布安裝檔」→ Run workflow)。"
+          fi
+          exit 1
+
+  # 排程停用提醒:讓這次執行顯示成失敗(紅色),GitHub 會寄失敗通知信。不影響同步和發布
+  schedule-warning:
+    name: 排程快被停用了
+    needs: sync
+    if: needs.sync.outputs.stale == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          DAYS: ${{ needs.sync.outputs.days }}
+          DEADLINE: ${{ needs.sync.outputs.deadline }}
+        run: |
+          echo "::error title=每週同步排程快被停用了::main 已經 $DAYS 天沒有新 commit。公開 repo 60 天沒有活動時 GitHub 會自動停用排程,預計 $DEADLINE 左右停用「每週同步官方」。在那之前 main 有新 commit(例如合併一個 PR)就會重新計算;已經被停用的話,到 Actions → 每週同步官方,按 Enable workflow。"
+          exit 1
+
+  release:
+    name: 建置並發布
+    needs: sync
+    if: needs.sync.outputs.run_release == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/my-release.yml
+    with:
+      force: false
