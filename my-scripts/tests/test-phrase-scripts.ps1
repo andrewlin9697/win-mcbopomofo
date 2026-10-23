@@ -19,15 +19,24 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 $work = Join-Path ([IO.Path]::GetTempPath()) ("phrase-scripts-test-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 $script:failures = 0
+$script:checks = 0
+$script:lastOutput = ''
 # 讓子程序的中文輸出在 CI 紀錄裡不會變成問號(沒有主控台時會失敗,不影響測試)
 try { [Console]::OutputEncoding = $utf8 } catch { }
 
 function Check([bool]$Condition, [string]$Name) {
+    $script:checks++
     if ($Condition) {
         Write-Host "  ok    $Name"
     } else {
         Write-Host "  FAIL  $Name" -ForegroundColor Red
         $script:failures++
+        if ($inCI) {
+            # 標在執行結果的摘要上,附上前一次執行腳本的輸出
+            $msg = "第 $($script:checks) 項:$Name`n$($script:lastOutput)"
+            if ($msg.Length -gt 3000) { $msg = $msg.Substring(0, 3000) }
+            Write-Host "::error title=測試失敗($($PSVersionTable.PSVersion.Major))::$($msg.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A'))"
+        }
     }
 }
 
@@ -36,7 +45,8 @@ function Run([string]$Script, [string[]]$Arguments) {
     $ErrorActionPreference = 'Continue'
     $out = & $ps -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments 2>&1 | Out-String
     $code = $LASTEXITCODE
-    Write-Host ($out.TrimEnd() -replace '(?m)^', '        | ')
+    $script:lastOutput = $out.TrimEnd()
+    Write-Host ($script:lastOutput -replace '(?m)^', '        | ')
     return $code
 }
 
@@ -166,7 +176,10 @@ try {
         $dl = New-Dir 'download'
         $f = Join-Path $dl 'install-phrases.ps1'
         Invoke-WebRequest "https://raw.githubusercontent.com/$($env:TEST_DOWNLOAD_REPO)/$($env:TEST_DOWNLOAD_REF)/my-scripts/install-phrases.ps1" -OutFile $f -UseBasicParsing
-        Check (Same-Bytes ([IO.File]::ReadAllBytes($f)) ([IO.File]::ReadAllBytes($install))) '下載的腳本和 repo 裡的一樣(含 BOM)'
+        # Windows 的 git checkout 可能把換行轉成 CRLF,只比較內容
+        $downloaded = [IO.File]::ReadAllBytes($f)
+        Check ($downloaded[0] -eq 0xEF -and $downloaded[1] -eq 0xBB -and $downloaded[2] -eq 0xBF) '下載的腳本有 BOM'
+        Check ($utf8.GetString($downloaded).Replace("`r`n", "`n") -eq $utf8.GetString([IO.File]::ReadAllBytes($install)).Replace("`r`n", "`n")) '下載的腳本和 repo 裡的一樣'
         $u = Join-Path $work 'install-download'
         $code = Run $f @('-UserDir', $u, '-Repo', $env:TEST_DOWNLOAD_REPO, '-Ref', $env:TEST_DOWNLOAD_REF)
         Check ($code -eq 0) "結束代碼 0(實際 $code)"
