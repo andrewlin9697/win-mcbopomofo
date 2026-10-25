@@ -1,0 +1,19 @@
+diff --git a/src/Client/McBopomofoTIP.cpp b/src/Client/McBopomofoTIP.cpp
+index 2a54f7f..c0bcd8c 100644
+--- a/src/Client/McBopomofoTIP.cpp
++++ b/src/Client/McBopomofoTIP.cpp
+@@ -1128,6 +1128,14 @@ bool McBopomofoTIP::handleStandaloneShiftKeyUp_(WPARAM wParam,
+ void McBopomofoTIP::ToggleOpenClose() {
+   if (ptim_) {
+     bool currentOpen = IsOpen();
++    if (currentOpen) {
++      // Commit the composing buffer before switching to English, like
++      // Microsoft Bopomofo does. Otherwise the Chinese text stays in the
++      // composition while English is typed outside of it, and text typed
++      // after switching back is appended to the old composition, so
++      // "我要用" + "python" + "打程式" ends up as "我要用打程式python".
++      resetServerState_();
++    }
+     // LogMessage("ToggleOpenClose: current state = %s, toggling to %s",
+     //            currentOpen ? "OPEN" : "CLOSED",
+     //            currentOpen ? "CLOSED" : "OPEN");

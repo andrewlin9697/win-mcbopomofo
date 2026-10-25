@@ -3,11 +3,12 @@
 這個 repo fork 自官方的 [openvanilla/win-mcbopomofo](https://github.com/openvanilla/win-mcbopomofo)(小麥注音 Windows 版)。
 官方不發行安裝檔,所以這裡用 GitHub Actions 自己編譯,把安裝檔放在 [Releases](https://github.com/andrewlin9697/win-mcbopomofo/releases)。
 
-- 官方原有的檔案一律不改,本 fork 只會新增自己的檔案:`.github/workflows/my-*.yml`、`my-phrases/`、`my-scripts/`、`MY-SETUP.md`。
+- 官方原有的檔案一律不改,本 fork 只會新增自己的檔案:`.github/workflows/my-*.yml`、`my-phrases/`、`my-scripts/`、`my-patches/`、`MY-SETUP.md`。
+- 要改小麥注音本身的行為時,改法寫成 `my-patches/` 裡的 patch,只在編譯安裝檔前套用(見[本 fork 的程式修改](#本-fork-的程式修改my-patches))。
 - 這裡編出來的是**非官方**、**沒有數位簽章**的安裝檔。
 - 不要對官方 repo 開 PR 或 issue(官方也寫明不收)。在 repo 頁面看到 **Contribute → Open pull request** 時不要按。
 
-內容:[下載與安裝](#下載與安裝)、[自訂詞庫](#自訂詞庫裝進小麥注音)、[備份到 Google 雲端硬碟](#備份到-google-雲端硬碟)、[小麥注音使用小抄](#小麥注音使用小抄)、[自動流程](#自動流程)、[出問題時怎麼知道](#出問題時怎麼知道)、[手動操作](#手動操作)、[排程被停用](#排程被停用)
+內容:[下載與安裝](#下載與安裝)、[自訂詞庫](#自訂詞庫裝進小麥注音)、[備份到 Google 雲端硬碟](#備份到-google-雲端硬碟)、[小麥注音使用小抄](#小麥注音使用小抄)、[本 fork 的程式修改](#本-fork-的程式修改my-patches)、[自動流程](#自動流程)、[出問題時怎麼知道](#出問題時怎麼知道)、[手動操作](#手動操作)、[排程被停用](#排程被停用)
 
 ## 下載與安裝
 
@@ -157,12 +158,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\backup-phrases.ps1
 
 小麥注音靠檔案修改時間發現 `user.txt`、`exclude.txt` 改了,會自己重新載入。
 
+## 本 fork 的程式修改(my-patches)
+
+官方原始碼不直接改。要改的地方寫成 `my-patches/*.patch`,「建置並發布安裝檔」在編譯前依檔名順序用 `git apply` 套上去。這樣每週同步官方時不會有合併衝突,官方檔案也一直和官方一樣。
+
+| patch | 改了什麼 |
+| --- | --- |
+| `0001-commit-composition-on-shift-to-english.patch` | 按 Shift(或點語言列)切到英文時,先把組字區的中文送出,跟微軟注音一樣。原本中文會留在組字區(底下有虛線),英文打在它後面,切回中文再打的字又接回組字區,所以打「我要用」→ Shift → `python` → Shift →「打程式」會變成「我要用打程式python」。 |
+
+**my-patches 套不上**:官方改到同一段程式時,「套用本 fork 的修改」那一步會變紅,安裝檔不會發布(Releases 上舊版還在,照常能用)。開一個 Claude Code session,請它照官方新版重做那個 patch。
+
+**改了 patch 之後要拿新版**:合併 PR 後到 Actions 手動發布一次,並勾選「強制重新發布」(官方版本沒變時,Release 的名字一樣,不勾會直接結束)。
+
 ## 自動流程
 
 | 流程(Actions 頁左邊的名字) | 檔案 | 什麼時候跑 | 做什麼 |
 | --- | --- | --- | --- |
 | 每週同步官方 | `my-sync.yml` | 每週六台灣時間 09:17;也可以手動執行 | 抓官方 main。沒有新 commit 而且最新版已經發布過 → 什麼都不做。有新 commit → 合併進 main 並推送,接著建置並發布。官方最新版還沒發布 → 補發。 |
-| 建置並發布安裝檔 | `my-release.yml` | 手動執行;被「每週同步官方」呼叫;PR 改到 `.github/workflows/my-*.yml` 時 | 在 Windows 上執行 `build_msi.ps1`(Release),發布 Release 並附上 `.msi` 和 `.sha256`。這個官方版本已經發布過就不做事(除非勾選「強制重新發布」)。PR 時只 build、不發布。 |
+| 建置並發布安裝檔 | `my-release.yml` | 手動執行;被「每週同步官方」呼叫;PR 改到 `.github/workflows/my-*.yml` 或 `my-patches/` 時 | 先套用 `my-patches/`,再在 Windows 上執行 `build_msi.ps1`(Release),發布 Release 並附上 `.msi` 和 `.sha256`。這個官方版本已經發布過就不做事(除非勾選「強制重新發布」)。PR 時只 build、不發布。 |
 | Build and Test(官方原有) | `build.yml` | push 到 main、對 main 開 PR 時 | 官方的編譯測試。自動同步推送的 commit 不會觸發它。 |
 | 檢查自訂詞庫 | `my-phrases-check.yml` | PR 或 push 到 main 改到 `my-phrases/`、`my-scripts/`、`data/data.txt`、`src/Server/Engine/` 時;也可以手動執行 | 檢查詞庫的格式、讀音、重複,並用小麥注音的引擎實際組字。見 [my-phrases/README.md](my-phrases/README.md)。 |
 | 測試詞庫腳本 | `my-scripts-test.yml` | PR 或 push 到 main 改到 `my-scripts/*.ps1`、`my-scripts/tests/` 時;也可以手動執行 | 在 Windows 上用 PowerShell 5.1 和 7 測試安裝詞庫、雲端備份、還原和工作排程(都在暫存資料夾裡,不用真的雲端硬碟)。 |
@@ -180,6 +193,7 @@ GitHub 排程常會晚幾分鐘到幾十分鐘才開始,這是正常的。
 | 紅色的執行 | 什麼時候 | 我要做什麼 |
 | --- | --- | --- |
 | 建置並發布安裝檔(或每週同步官方裡的「建置並發布」)失敗 | 編譯或發布失敗 | 通常是官方程式碼或 GitHub 環境的問題。可以等下週自動再試,或之後手動發布一次 |
+| 建置並發布安裝檔:「套用本 fork 的修改」失敗 | 官方更新改到 patch 碰到的那段程式 | 見上面「my-patches 套不上」 |
 | 每週同步官方:合併衝突 | 官方的更新和本 fork 的檔案衝突 | main 沒有被改動。需要手動解決衝突(可以請 Claude 幫忙)。**不要**在 Sync fork 按 Discard commits |
 | 每週同步官方:需要手動 Sync fork | 官方更新動到 `.github/workflows/`,自動流程沒有權限推送 | 到 repo 頁面按 **Sync fork → Update branch**,完成後到 Actions 手動發布一次(見下方) |
 | 每週同步官方:排程快被停用了 | main 超過 42 天沒有新 commit | 見下方「排程被停用」。這種情況同步和發布照常進行 |
