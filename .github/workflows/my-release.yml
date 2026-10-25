@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/my-*.yml
+      - my-patches/**
 
 # 自己執行時和「每週同步官方」共用 my-pipeline,同一時間只會有一個在跑。
 # 被同步流程呼叫時,my-pipeline 已經由同步流程佔住,這裡換一個不重複的名字,避免互相等待卡死。
@@ -199,6 +200,22 @@ jobs:
           ref: ${{ needs.plan.outputs.build_sha }}
           submodules: recursive
           persist-credentials: false
+
+      # 本 fork 對官方原始碼的修改都放在 my-patches/,只在編譯前套用,repo 裡的官方檔案本身不改。
+      # 官方更新後如果套不上,這一步會變紅,說明見 MY-SETUP.md 的「my-patches 套不上」。
+      - name: 套用本 fork 的修改(my-patches)
+        shell: pwsh
+        run: |
+          $patches = @(Get-ChildItem -Path my-patches -Filter *.patch -File -ErrorAction SilentlyContinue | Sort-Object Name)
+          if ($patches.Count -eq 0) { "沒有要套用的修改"; exit 0 }
+          foreach ($p in $patches) {
+            git apply --ignore-whitespace --whitespace=nowarn --verbose $p.FullName
+            if ($LASTEXITCODE -ne 0) {
+              "::error::$($p.Name) 套不上官方最新的原始碼,可能是官方改到了同一段程式。請開新的 Claude Code session 依官方新版重做這個 patch。"
+              exit 1
+            }
+            "已套用 $($p.Name)" >> $env:GITHUB_STEP_SUMMARY
+          }
 
       # 和官方 build.yml 的同名步驟相同
       - name: Install WiX Toolset
