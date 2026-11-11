@@ -27,6 +27,7 @@ Windows 版的 `user.txt` 實際位置是 `%APPDATA%\WinMcBopomofo\user.txt`:`La
 
 ## 規則(`my-scripts/check_phrases.py` 會檢查)
 
+- 詞和注音中間只能是**一個半形空白**。全形空白會讓引擎把整行略過(不會報錯,只是那個詞打不出來),Tab 和行尾空白也一律不收。
 - 不收單字詞;最多 8 個音節(引擎 `ReadingGrid::kMaximumSpanLength`,超過就不能當成一個詞打出來)。
 - 只能有中文字。夾英文字母的詞(EMI 中心、ABF 載板),注音只能對應中文部分,打中文部分就會冒出英文字母,反而干擾一般的「中心」「載板」,所以只收中文部分。
 - 每個音節要合法,每個字的讀音要在 `data.txt` 的單字讀音裡。

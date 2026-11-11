@@ -4,7 +4,7 @@
 用法:python3 my-scripts/check_phrases.py [--data data/data.txt] [my-phrases/*.txt ...]
 
 錯誤(有任何一個就以 1 結束):
-  - 格式不是「詞 注音」,或檔案有 BOM / CRLF
+  - 格式不是「詞 注音」(中間只能是一個半形空白;全形空白、Tab、行尾空白都算錯),或檔案有 BOM / CRLF
   - 詞夾英文字母、數字或符號(注音只能對應中文字),或只有一個字
   - 音節超過 8 個(引擎 ReadingGrid::kMaximumSpanLength,超過就沒辦法當成一個詞打出來)
   - 音節不合法,或不是 data.txt 裡有的音節
@@ -65,10 +65,13 @@ def read_entries(path, name, errors):
     for lineno, line in enumerate(raw.decode("utf-8-sig").splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
-        parts = line.split()
+        # 只接受「詞、一個半形空白、注音」。line.split() 會把全形空白當成分隔,
+        # 但引擎不會,那一行會被整行略過(2026-11 實測:兩道檢查都過,引擎載入 0 個詞)。
+        # Tab 和行尾空白引擎吃得下,這裡刻意比引擎嚴一點,格式只留一種。
+        parts = line.split(" ")
         where = f"{path}:{lineno}"
-        if len(parts) != 2:
-            errors.append(f"{where}: 格式要是「詞 注音」兩欄:{line!r}")
+        if len(parts) != 2 or any(not p or p != p.strip() for p in parts) or "\u3000" in line:
+            errors.append(f"{where}: 格式要是「詞 注音」兩欄,中間只能是一個半形空白(不能用全形空白、Tab,行尾不能有空白):{line!r}")
             continue
         entries.append((where, path, parts[0], parts[1]))
     return entries
