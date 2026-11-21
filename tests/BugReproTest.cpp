@@ -331,6 +331,30 @@ _punctuation_, ， -1.0
   EXPECT_GE(stateCount, 1);
 }
 
+TEST_F(BugReproTest, NumberRowPassesThroughForLayoutsWithoutNumberKeys) {
+  const Formosa::Mandarin::BopomofoKeyboardLayout* layouts[] = {
+      Formosa::Mandarin::BopomofoKeyboardLayout::HsuLayout(),
+      Formosa::Mandarin::BopomofoKeyboardLayout::ETen26Layout(),
+  };
+
+  for (const auto* layout : layouts) {
+    keyHandler->setKeyboardLayout(layout);
+
+    for (char digit = '0'; digit <= '9'; ++digit) {
+      InputStates::Inputting state("", 0);
+      int errorCount = 0;
+      int stateCount = 0;
+
+      EXPECT_FALSE(keyHandler->handle(
+          Key::asciiKey(digit), &state,
+          [&stateCount](std::unique_ptr<InputState>) { stateCount++; },
+          [&errorCount]() { errorCount++; }));
+      EXPECT_EQ(errorCount, 0);
+      EXPECT_EQ(stateCount, 0);
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

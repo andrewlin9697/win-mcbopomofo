@@ -550,6 +550,10 @@ bool KeyHandler::handle(Key key, McBopomofo::InputState* state,
   }
 
   // No key is handled. Refresh and consume the key.
+  if (reading_.isEmpty() && grid_.length() == 0) {
+    return false;
+  }
+
   if (maybeNotEmptyState != nullptr) {
     // It is possible that FCITX just passes a single shift key event here.
     // When it is in the marking state, we do not want to go back to the
